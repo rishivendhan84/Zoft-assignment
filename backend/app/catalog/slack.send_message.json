@@ -1,0 +1,18 @@
+{
+  "type": "slack.send_message",
+  "category": "action",
+  "title": "Slack: Send message",
+  "description": "Posts a message to a Slack channel.",
+  "keywords": ["slack", "message", "notify", "notification", "channel", "chat", "post"],
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "channel": { "type": "string", "pattern": "^#", "description": "Channel to post to, e.g. #payments" },
+      "text": { "type": "string", "minLength": 1, "description": "Message template; {{field}} interpolates trigger data" }
+    },
+    "required": ["channel", "text"],
+    "additionalProperties": false
+  },
+  "input_ports": ["in"],
+  "output_ports": ["out"]
+}

@@ -1,0 +1,19 @@
+{
+  "type": "teams.send_message",
+  "category": "action",
+  "title": "Microsoft Teams: Send message",
+  "description": "Posts a message to a Microsoft Teams channel via webhook.",
+  "keywords": ["teams", "microsoft", "message", "notify", "notification", "channel", "chat", "post"],
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "team": { "type": "string", "minLength": 1, "description": "Team name" },
+      "channel": { "type": "string", "minLength": 1, "description": "Channel inside the team" },
+      "text": { "type": "string", "minLength": 1, "description": "Message template; {{field}} interpolates trigger data" }
+    },
+    "required": ["team", "channel", "text"],
+    "additionalProperties": false
+  },
+  "input_ports": ["in"],
+  "output_ports": ["out"]
+}

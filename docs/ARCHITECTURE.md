@@ -34,7 +34,7 @@ Three constraints shape every decision:
               └──────────────────┘      └────────────────────────┘
 ```
 
-**Why operations, not full workflow JSON?** Operations (`add_node`, `remove_node`, `connect`, `disconnect`, `set_config`, `set_condition`) are small, diffable, and independently validatable. They give us version diffs, audit history, and "why did you change that?" for free, and they keep the LLM's output surface tiny (far fewer ways to be wrong than emitting an entire graph).
+**Why operations, not full workflow JSON?** Operations (`add_node`, `remove_node`, `connect`, `disconnect`, `set_config` — conditions are just `set_config` on a logic node) are small, diffable, and independently validatable. They give us version diffs, audit history, and "why did you change that?" for free, and they keep the LLM's output surface tiny (far fewer ways to be wrong than emitting an entire graph).
 
 ## 3. Workflow representation
 
@@ -126,11 +126,11 @@ node_catalog(...)  -- see §4
 
 ## 8. Asynchronous processing
 
-Slow work (generation, validation of large graphs, embedding, catalog indexing) runs on **Redis-backed workers**, not in the request path.
+Slow work (generation, validation of large graphs, embedding, catalog indexing) never blocks the request path.
 
-- Chat request opens an **SSE stream** immediately and returns a `run_id`.
-- The agent run executes on a worker; progress events are published to a Redis channel the SSE endpoint subscribes to.
-- Jobs are **idempotent** (keyed by run_id) and failures land in a **dead-letter queue** for inspection.
+- `POST …/messages` returns `202 {run_id}` immediately; the agent run executes as a background task and publishes progress to an **event bus** the SSE endpoint subscribes to.
+- The bus has two implementations behind one interface: **in-memory** (default, zero-dependency dev) and **Redis** (pub/sub + a replay list per run, giving `Last-Event-ID` resume across API instances). The bus is the seam: moving runs from in-process tasks to a dedicated **worker pool** is a deployment change — the API only ever *subscribes*.
+- Runs are **idempotent rows keyed by run_id** (status: running/completed/failed/cancelled); in a worker deployment, failed jobs land in a **dead-letter queue** for inspection.
 
 ## 9. Performance & scale (100k workflows, 10k convos/day, hundreds of nodes)
 

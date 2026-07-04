@@ -40,7 +40,36 @@ Built end-to-end for the reference scenario — *"Slack message when Stripe rece
 ## Run
 
 ```bash
-docker compose up --build   # backend + frontend + postgres + redis
+docker compose up --build
+# frontend → http://localhost:5173   backend API → http://localhost:8000 (docs at /docs)
 ```
 
-See `backend/README.md` and `frontend/README.md`.
+No API keys needed: the LLM provider chain ends in a **deterministic scripted
+provider**, so the full demo runs offline. Set `ANTHROPIC_API_KEY` on the
+backend service to put a real model at the front of the chain — the scripted
+provider then becomes the failover target.
+
+Local dev without Docker (SQLite + in-memory bus, zero services):
+
+```bash
+cd backend && python -m venv .venv && . .venv/bin/activate \
+  && pip install -r requirements.txt && uvicorn app.main:app --reload
+cd frontend && npm install && npm run dev     # http://localhost:5173
+```
+
+Tests: `cd backend && pytest` — 25 tests including a full end-to-end run of the
+reference conversation over REST + SSE.
+
+**Demo levers** (type in chat): `!hallucinate` makes the planner propose a
+non-existent node so you can watch the validator reject it and the repair loop
+recover; `!timeout` simulates a hung provider (clean failure, nothing persists).
+
+## Try this conversation
+
+1. *Send a Slack message to #sales when Stripe receives a payment* → creates v1
+2. *Use Microsoft Teams instead of Slack* → v2, diff visible in History
+3. *Only notify me for payments over $500 on weekdays* → v3 inserts a filter
+4. *Explain what this workflow does* → read-only, no new version
+5. *Why did you change that?* → answers from the stored rationale + operations
+
+See `backend/README.md`, `frontend/README.md`, and `docs/DEMO.md` (video script).
