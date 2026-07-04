@@ -1,0 +1,31 @@
+{
+  "type": "logic.filter",
+  "category": "logic",
+  "title": "Filter: Continue only if…",
+  "description": "Evaluates conditions against the incoming event; routes to the 'true' port when they pass, 'false' otherwise.",
+  "keywords": ["filter", "condition", "if", "only", "greater", "less", "weekday", "branch", "logic"],
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "mode": { "type": "string", "enum": ["all", "any"], "default": "all" },
+      "conditions": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "properties": {
+            "field": { "type": "string", "minLength": 1 },
+            "op": { "type": "string", "enum": [">", ">=", "<", "<=", "==", "!=", "in", "not_in", "contains"] },
+            "value": {}
+          },
+          "required": ["field", "op", "value"],
+          "additionalProperties": false
+        }
+      }
+    },
+    "required": ["conditions"],
+    "additionalProperties": false
+  },
+  "input_ports": ["in"],
+  "output_ports": ["true", "false"]
+}

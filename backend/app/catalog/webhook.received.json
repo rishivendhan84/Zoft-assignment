@@ -1,0 +1,16 @@
+{
+  "type": "webhook.received",
+  "category": "trigger",
+  "title": "Webhook: Request received",
+  "description": "Fires when an HTTP request hits the workflow's webhook URL.",
+  "keywords": ["webhook", "http", "request", "trigger", "api", "incoming"],
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "method": { "type": "string", "enum": ["GET", "POST", "PUT"], "default": "POST" }
+    },
+    "additionalProperties": false
+  },
+  "input_ports": [],
+  "output_ports": ["out"]
+}

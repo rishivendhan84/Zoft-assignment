@@ -1,0 +1,16 @@
+{
+  "type": "stripe.payment_received",
+  "category": "trigger",
+  "title": "Stripe: Payment received",
+  "description": "Fires when a Stripe payment succeeds. Emits amount, currency, customer_email and day_of_week.",
+  "keywords": ["stripe", "payment", "charge", "money", "received", "transaction", "checkout"],
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "livemode": { "type": "boolean", "default": false, "description": "Listen to live events instead of test events" }
+    },
+    "additionalProperties": false
+  },
+  "input_ports": [],
+  "output_ports": ["out"]
+}

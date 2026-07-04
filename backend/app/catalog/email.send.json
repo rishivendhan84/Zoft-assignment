@@ -1,0 +1,19 @@
+{
+  "type": "email.send",
+  "category": "action",
+  "title": "Email: Send",
+  "description": "Sends an email to one or more recipients.",
+  "keywords": ["email", "mail", "send", "notify", "smtp", "message"],
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "to": { "type": "string", "format": "email", "description": "Recipient address" },
+      "subject": { "type": "string", "minLength": 1 },
+      "body": { "type": "string", "minLength": 1 }
+    },
+    "required": ["to", "subject", "body"],
+    "additionalProperties": false
+  },
+  "input_ports": ["in"],
+  "output_ports": ["out"]
+}

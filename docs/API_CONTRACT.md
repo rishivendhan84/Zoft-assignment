@@ -16,6 +16,8 @@ This is the **only** coupling between the two teams. Either side can be built in
 
 ```
 POST   /conversations                        → { conversation_id }
+GET    /conversations                        → [ ConversationSummary ]
+GET    /conversations/{cid}/messages         → [ Message ]         (history reload)
 GET    /workflows                            → [ WorkflowSummary ]
 GET    /workflows/{id}                       → Workflow (current version)
 GET    /workflows/{id}/versions              → [ VersionSummary ]
@@ -112,6 +114,20 @@ type WorkflowVersion = {
 };
 
 type OperationDiff = { from: string; to: string; operations: Operation[] };
+
+type ConversationSummary = {
+  id: string; workflow_id?: string; title?: string; created_at: string;
+};
+
+type Message = {
+  id: string; conversation_id: string;
+  role: 'user'|'assistant'|'system';
+  content: string; run_id?: string; created_at: string;
+};
+
+type WorkflowSummary = {
+  id: string; name: string; current_version_id: string; updated_at: string;
+};
 ```
 
 ## Error model (REST)
