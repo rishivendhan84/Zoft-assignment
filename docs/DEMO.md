@@ -54,8 +54,10 @@ Type: **"!timeout add an email step"**
 - Provider call times out → retries → fails over → run ends `failed` with a
   readable error banner and a **Try again** affordance. No partial state.
 
-Optionally kill the backend mid-run to show the **reconnecting** pill
-(`Last-Event-ID` replay on resume) and the **Cancel** button on a live run.
+Optionally: click **Cancel** on a live run (`done{cancelled}`, nothing saved),
+and restart the backend mid-run — the UI shows the **reconnecting** pill while
+EventSource retries, then settles cleanly: a startup sweep marks orphaned runs
+failed and publishes their terminal event, so no run is ever stuck "working".
 
 ### 6. Catalog is data, not code (≈1 min)
 ```bash

@@ -9,7 +9,24 @@ import type {
 
 export const listWorkflows = () => http.get<WorkflowSummary[]>('/workflows');
 
-export const getWorkflow = (id: string) => http.get<Workflow>(`/workflows/${id}`);
+/** Raw wire shape of GET /workflows/{id}: the current version is nested. */
+type WorkflowResponse = {
+  id: string;
+  name: string;
+  current_version_id: string | null;
+  version: WorkflowVersion | null;
+};
+
+export const getWorkflow = async (id: string): Promise<Workflow> => {
+  const raw = await http.get<WorkflowResponse>(`/workflows/${id}`);
+  return {
+    id: raw.id,
+    name: raw.name,
+    current_version_id: raw.current_version_id ?? '',
+    updated_at: raw.version?.created_at ?? '',
+    graph: raw.version?.graph ?? { nodes: [], edges: [] },
+  };
+};
 
 export const listVersions = (workflowId: string) =>
   http.get<VersionSummary[]>(`/workflows/${workflowId}/versions`);

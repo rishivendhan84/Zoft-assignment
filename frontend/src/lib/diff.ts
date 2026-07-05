@@ -9,7 +9,12 @@ export type GraphHighlights = {
   removedEdges: Set<string>;
 };
 
-export const edgeKey = (from: string, to: string) => `${from}→${to}`;
+/** Port-aware: parallel edges (a filter's true/false branches) must not collide. */
+export const edgeKey = (from: string, to: string, port?: string) =>
+  `${from}→${to}:${port ?? ''}`;
+
+/** Pair-only key — disconnect operations don't carry a port. */
+export const edgePairKey = (from: string, to: string) => `${from}→${to}`;
 
 export function emptyHighlights(): GraphHighlights {
   return {
@@ -35,10 +40,10 @@ export function highlightsFromOperations(operations: Operation[]): GraphHighligh
         h.changedNodes.add(op.id);
         break;
       case 'connect':
-        h.addedEdges.add(edgeKey(op.from, op.to));
+        h.addedEdges.add(edgeKey(op.from, op.to, op.port));
         break;
       case 'disconnect':
-        h.removedEdges.add(edgeKey(op.from, op.to));
+        h.removedEdges.add(edgePairKey(op.from, op.to));
         break;
     }
   }

@@ -40,7 +40,12 @@ def diff_graphs(old: dict, new: dict) -> list[dict]:
                  "config": n.get("config", {})}
             )
         elif n.get("config", {}) != old_nodes[nid].get("config", {}):
-            ops.append({"op": "set_config", "id": nid, "config": n.get("config", {})})
+            # null-out keys that disappeared so apply() round-trips exactly
+            payload = dict(n.get("config", {}))
+            for key in old_nodes[nid].get("config", {}):
+                if key not in payload:
+                    payload[key] = None
+            ops.append({"op": "set_config", "id": nid, "config": payload})
 
     for eid, e in new_edges.items():
         if eid not in old_edges or touches_replaced(eid):

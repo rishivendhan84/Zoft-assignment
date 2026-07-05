@@ -44,17 +44,27 @@ class CircuitBreaker:
                 self.opened_at = time.monotonic()
 
 
+# Breakers are process-wide, keyed by provider name: a provider that just
+# failed three runs in a row must stay open for the NEXT run too — per-run
+# breakers would never accumulate state.
+_shared_breakers: dict[str, CircuitBreaker] = {}
+
+
+def _breaker(name: str) -> CircuitBreaker:
+    if name not in _shared_breakers:
+        s = get_settings()
+        _shared_breakers[name] = CircuitBreaker(
+            s.circuit_breaker_threshold, s.circuit_breaker_cooldown_seconds)
+    return _shared_breakers[name]
+
+
 class ProviderChain:
     def __init__(self, providers: list[LLMProvider],
                  on_event: Callable[[dict], Awaitable[None]] | None = None):
         s = get_settings()
         self.providers = providers
         self.timeout = s.llm_timeout_seconds
-        self.breakers = {
-            p.name: CircuitBreaker(
-                s.circuit_breaker_threshold, s.circuit_breaker_cooldown_seconds)
-            for p in providers
-        }
+        self.breakers = {p.name: _breaker(p.name) for p in providers}
         self.on_event = on_event
 
     async def _notify(self, data: dict) -> None:
@@ -95,14 +105,20 @@ class ProviderChain:
             breaker = self.breakers[provider.name]
             if breaker.open:
                 continue
+            yielded = False
             try:
                 async for token in provider.stream(system, user):
+                    yielded = True
                     yield token
                 breaker.record(ok=True)
                 return
             except ProviderError as e:
                 last_error = e
                 breaker.record(ok=False)
+                if yielded:
+                    # partial output already reached the client — failing over
+                    # would duplicate text, so surface the failure instead
+                    raise
                 await self._notify({
                     "provider": provider.name, "status": "failing_over", "error": str(e),
                 })

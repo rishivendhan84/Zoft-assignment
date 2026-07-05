@@ -10,11 +10,13 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from app.db import Base, engine
+from app.llm import chain as chain_mod
 from app.main import app
 
 
 @pytest_asyncio.fixture
 async def client():
+    chain_mod._shared_breakers.clear()  # breaker state is process-wide by design
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
     async with app.router.lifespan_context(app):

@@ -113,8 +113,12 @@ def _create_plan(msg: str, graph: dict, catalog: dict) -> dict | None:
 def _swap_plan(msg: str, graph: dict, catalog: dict) -> dict | None:
     if not re.search(r"instead|replace|swap|switch|rather|use (microsoft )?teams|use slack", msg):
         return None
-    target = _match_node(msg, catalog, category="action")
-    if not target:
+    # the swap target must be a service the message actually names (its type
+    # prefix, e.g. 'teams'), and must not already be in the graph — otherwise
+    # generic keywords like 'channel' misread config edits as swaps
+    present = {n["type"] for n in graph["nodes"]}
+    target = _match_node(msg, catalog, category="action", exclude=present)
+    if not target or target["type"].split(".")[0] not in msg:
         return None
     victim = next(
         (n for n in graph["nodes"]
@@ -217,7 +221,10 @@ def _config_edit_plan(msg: str, graph: dict, catalog: dict) -> dict | None:
         updates["channel"] = prefix + channel.group(1)
     quoted = re.search(r"[\"“](.+?)[\"”]", msg)
     if quoted and re.search(r"say|text|message|body", msg):
-        updates["text"] = quoted.group(1)
+        props = catalog[action["type"]]["config_schema"].get("properties", {})
+        text_key = "text" if "text" in props else ("body" if "body" in props else None)
+        if text_key:
+            updates[text_key] = quoted.group(1)
     if not updates:
         return None
     return {
@@ -262,9 +269,9 @@ def _repair(ctx: dict, graph: dict, catalog: dict, errors: list) -> dict:
                 (n["type"] for n in graph["nodes"] if n["id"] == node_id), None)
             spec = catalog.get(node_type)
             if spec:
+                # defaults fill the gaps; values the planner already chose win
                 filled = {**_default_config(spec, ctx.get("user_message", "")),
-                          **(target_op.get("config") if target_op else {})}
-                filled = {**filled, **_default_config(spec, ctx.get("user_message", ""))}
+                          **((target_op.get("config") or {}) if target_op else {})}
                 if target_op:
                     target_op["config"] = filled
                 else:
@@ -340,13 +347,20 @@ def _describe_graph(graph: dict, catalog: dict) -> str:
 
 # ---------------------------------------------------------------- helpers
 
-def _match_node(msg: str, catalog: dict, category: str) -> dict | None:
+def _match_node(msg: str, catalog: dict, category: str,
+                exclude: set[str] | None = None) -> dict | None:
     tokens = set(re.split(r"[^a-z0-9$#]+", msg.lower()))
 
     def score(spec: dict) -> int:
-        return len(tokens & {k.lower() for k in spec.get("keywords", [])})
+        base = len(tokens & {k.lower() for k in spec.get("keywords", [])})
+        # naming the service itself ("teams", "slack") beats generic keyword
+        # overlap ("channel", "message") — prevents tie-break misfires
+        if spec["type"].split(".")[0] in tokens:
+            base += 2
+        return base
 
-    candidates = [c for c in catalog.values() if c["category"] == category]
+    candidates = [c for c in catalog.values() if c["category"] == category
+                  and c["type"] not in (exclude or set())]
     best = max(candidates, key=score, default=None)
     return best if best and score(best) > 0 else None
 

@@ -68,7 +68,14 @@ export function openRunStream(runId: string, handlers: RunStreamHandlers): () =>
 
   source.onopen = () => handlers.onConnectionChange(true);
   // EventSource retries automatically; we only surface "reconnecting…" state.
-  source.onerror = () => handlers.onConnectionChange(false);
+  // Careful: the contract's *business* `error` events also dispatch here (the
+  // event type is literally 'error') — those carry `data`, transport drops
+  // don't, and a healthy-open stream is never "reconnecting".
+  source.onerror = (e) => {
+    const isServerFrame = (e as globalThis.MessageEvent).data !== undefined;
+    if (isServerFrame || source.readyState === EventSource.OPEN) return;
+    handlers.onConnectionChange(false);
+  };
 
   return () => source.close();
 }

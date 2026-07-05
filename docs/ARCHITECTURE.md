@@ -13,8 +13,8 @@ Three constraints shape every decision:
 ```
                  ┌─────────────────────────────────────────────┐
  user message →  │  LangGraph Agent (planner, stateless re DB)  │
-                 │  tools: search_nodes, get_node_schema,       │
-                 │         get_workflow, propose_operations      │
+                 │  retrieval: search_nodes / get_node_schema   │
+                 │  proposal: schema-constrained JSON output    │
                  └───────────────┬─────────────────────────────┘
                                  │  Operation[]  (never raw state writes)
                                  ▼
@@ -69,12 +69,12 @@ node_catalog(
   config_schema   jsonb,                -- JSON Schema for `config`
   input_ports     jsonb,                -- [] for triggers
   output_ports    jsonb,                -- e.g. ["true","false"] for filter
-  embedding       vector(1536)          -- for semantic search / RAG
+  embedding       vector(1536)          -- for semantic search at scale (pgvector)
 )
 ```
 
-- New node = a new row. **No redeploy.**
-- The agent discovers nodes via `search_nodes(query)` (pgvector similarity over `embedding`) and reads `get_node_schema(type)` before configuring — it never guesses a node exists.
+- New node = a new row (or `POST /node-catalog`). **No redeploy.**
+- The agent discovers nodes via `search_nodes(query)` and reads `get_node_schema(type)` before configuring — it never guesses a node exists. *In this demo* `search_nodes` is lexical token-overlap behind the same signature; the `embedding` column + pgvector cosine query is the drop-in replacement once the catalog grows past what keyword match handles (hundreds of nodes).
 - The validator uses `config_schema` + `input/output_ports` as the source of truth.
 
 ## 5. Agent design (LangGraph)
@@ -84,45 +84,48 @@ A state machine, each transition emitting a progress event over SSE:
 | Node | Does | Emits |
 |---|---|---|
 | `plan` | Interpret intent from message + conversation memory | `Planning workflow…` |
-| `retrieve` | `search_nodes` + `get_node_schema` (RAG over catalog) | `Searching available nodes…`, `Reading {node} schema…` |
-| `propose` | Produce `Operation[]` via structured tool call | `Generating changes…` |
+| `retrieve` | `search_nodes` + `get_node_schema` (RAG over catalog; always includes schemas for types already in the graph) | `Searching available nodes…`, `Reading {node} schema…` |
+| `propose` | Produce `Operation[]` as schema-constrained JSON (a parse failure triggers one targeted retry with the error injected) | `Generating changes…` |
 | `validate` | Call deterministic validator | `Calling validator…` |
 | `repair` | On failure, add errors to context, loop (≤ N) | `Fixing missing configuration…` |
 | `commit` | Persist new version, link rationale | `Saving version…` |
 | `explain` | Summarize the diff in natural language | streamed tokens, `Done.` |
 
-Memory: conversation summary + last version id are kept per conversation; only *relevant* node schemas are pulled into context (keeps us under token limits).
+Memory: the last version (operations + rationale) plus a recent-message window (last 6) go into the planning context; only *relevant* node schemas are pulled in. At scale the window becomes a rolling conversation summary — same context slot, cheaper to produce than to retrofit.
 
 ## 6. Reliability — recovery strategy
 
 | LLM failure | Detection | Recovery |
 |---|---|---|
-| Hallucinated node | Validator: unknown `type` | Repair loop with "valid types near X" hint from catalog |
-| Invalid JSON | Structured/JSON-mode output; parse guard | Retry once with the parse error injected |
-| Invalid tool call | Tool dispatcher rejects unknown/misparam tool | Return valid tool list → re-propose |
-| Context limit | Token budget guard before call | Summarize conversation, RAG-trim node schemas |
-| Incomplete answer | Validator: missing required config | Targeted follow-up op request |
-| Timeout | Per-call deadline | Exponential backoff → fallback provider |
-| Provider unavailable | Circuit breaker per provider | Route to next provider in the chain |
+| Hallucinated node | Validator: unknown `type` | Repair loop with "did you mean" hint from catalog |
+| Invalid JSON | JSON-mode output; parse guard | Retry once with the parse error injected |
+| Invalid operation | Op applier rejects unknown/malformed ops | Rejected list fed back → re-propose |
+| Context limit | Recent-message window + RAG-trimmed schemas | Rolling summary at scale (same context slot) |
+| Incomplete answer | Validator: missing required config | Errors fed back → targeted repair |
+| Timeout | Per-call deadline | One retry with backoff → fallback provider |
+| Provider unavailable | Circuit breaker per provider (process-wide state) | Route to next provider in the chain |
+| Concurrent edits | Commit is a CAS on the workflow head | Loser fails with recoverable `workflow_conflict`; nothing clobbered |
+| Server restart mid-run | Startup sweep finds `running` runs | Marked failed + `done` published; clients settle cleanly |
 
 Every repair is **bounded** (max N). On exhaustion the run ends in a clean `failed` state with a human-readable reason — the DB is never left partially mutated because commit is the *last* step and versions are immutable.
 
 ## 7. Persistence (PostgreSQL)
 
 ```
-workflows(id, name, current_version_id, created_at)
+workflows(id, name, current_version_id, created_at, updated_at)
 workflow_versions(
   id, workflow_id, parent_version_id,
   graph jsonb, operations jsonb,        -- the ops that produced this version
   author enum('user','ai'), rationale text, created_at)   -- immutable
-conversations(id, workflow_id, created_at)
-messages(id, conversation_id, role, content, created_at)
-jobs(id, type, status, progress jsonb, result jsonb, error text)  -- async
+conversations(id, workflow_id, title, created_at)
+messages(id, conversation_id, role, content, run_id, created_at)
+runs(id, conversation_id, workflow_id, status, error, created_at)  -- one per user message
 node_catalog(...)  -- see §4
 ```
 
 - **Immutable versions** → free history, diff, rollback, and audit.
 - `operations` + `rationale` per version power *"why did you make that change?"* deterministically (no re-asking the LLM).
+- **Commit is optimistic-concurrency-safe**: advancing `workflows.current_version_id` is a compare-and-swap against the version the run planned on; a concurrent commit makes the loser fail with a recoverable `workflow_conflict` instead of silently reverting the winner's change.
 
 ## 8. Asynchronous processing
 
@@ -135,7 +138,7 @@ Slow work (generation, validation of large graphs, embedding, catalog indexing) 
 ## 9. Performance & scale (100k workflows, 10k convos/day, hundreds of nodes)
 
 - **Reads:** current version denormalized on `workflows.current_version_id`; versions are append-only → cache-friendly; read replicas for history/analytics.
-- **Catalog search:** pgvector IVFFlat index on `embedding`; catalog is small and cacheable in memory.
+- **Catalog search:** pgvector IVFFlat index on `embedding` (the demo's lexical search shares the same interface; see §4); catalog is small and cacheable in memory.
 - **Big graphs:** operations validate incrementally against a copy; no full re-serialization on the wire (send ops + resulting version, not the whole editor state).
 - **Providers:** provider abstraction with per-provider rate-limit + circuit breaker; cost tracked per run.
 - **Horizontal scale:** stateless API + worker pool behind a queue; Postgres partitioning of `messages`/`jobs` by time if needed.
@@ -146,7 +149,7 @@ Slow work (generation, validation of large graphs, embedding, catalog indexing) 
 |---|---|
 | New node type | Insert a `node_catalog` row (+embedding). Zero code. |
 | New LLM provider | Implement the `LLMProvider` interface; add to the fallback chain. |
-| New AI tool | Register in the tool registry; expose to the agent. |
+| New AI tool | Add a retrieval/context step to the agent graph (each node is an isolated function over `AgentState`). |
 | New workflow engine | The graph is engine-agnostic; add an `Executor` adapter that reads a version and runs it. |
 
 ## 11. Observability

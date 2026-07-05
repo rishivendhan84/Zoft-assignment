@@ -106,6 +106,7 @@ export type StepEvent = {
   tool?: string;
   arg?: string;
   attempt?: number;
+  max_attempts?: number;
 };
 
 export type TokenEvent = { text: string };
