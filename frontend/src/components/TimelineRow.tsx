@@ -2,13 +2,18 @@ import type { TimelineEntry } from '../store/useStore';
 import { AlertIcon, PhaseIcon, Spinner } from './icons';
 import { ValidationRow } from './ValidationRow';
 
-/**
- * The contract only carries `attempt`; the backend's repair loop is bounded,
- * assumed at 3 attempts (documented in the README).
- */
-const MAX_REPAIR_ATTEMPTS = 3;
+/** Fallback when a repair step predates the backend's max_attempts field. */
+const DEFAULT_MAX_ATTEMPTS = 3;
 
-export function TimelineRow({ entry, active }: { entry: TimelineEntry; active: boolean }) {
+export function TimelineRow({
+  entry,
+  active,
+  live,
+}: {
+  entry: TimelineEntry;
+  active: boolean;
+  live: boolean;
+}) {
   if (entry.kind === 'validation') {
     return <ValidationRow entry={entry} />;
   }
@@ -20,11 +25,16 @@ export function TimelineRow({ entry, active }: { entry: TimelineEntry; active: b
         <span className="min-w-0">
           <span className="font-medium">{entry.message}</span>
           <span className="ml-1.5 text-red-400/80 dark:text-red-500/80">({entry.code})</span>
-          {entry.recoverable && (
-            <span className="ml-2 inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
-              <Spinner size={10} /> Retrying…
-            </span>
-          )}
+          {entry.recoverable &&
+            (live ? (
+              <span className="ml-2 inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                <Spinner size={10} /> Retrying…
+              </span>
+            ) : (
+              <span className="ml-2 text-amber-600/80 dark:text-amber-400/80">
+                (recoverable)
+              </span>
+            ))}
         </span>
       </div>
     );
@@ -48,7 +58,8 @@ export function TimelineRow({ entry, active }: { entry: TimelineEntry; active: b
       )}
       {entry.attempt !== undefined && (
         <span className="shrink-0 rounded-full border border-amber-300 bg-amber-50 px-1.5 py-px text-[10px] font-medium text-amber-700 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-400">
-          attempt {entry.attempt}/{Math.max(MAX_REPAIR_ATTEMPTS, entry.attempt)}
+          attempt {entry.attempt}/
+          {entry.max_attempts ?? Math.max(DEFAULT_MAX_ATTEMPTS, entry.attempt)}
         </span>
       )}
     </div>

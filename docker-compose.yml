@@ -31,6 +31,13 @@ services:
       # ANTHROPIC_API_KEY: sk-ant-…
     ports:
       - "8000:8000"
+    healthcheck:
+      # slim image has no curl; stdlib does the job
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
     depends_on:
       postgres:
         condition: service_healthy
@@ -47,7 +54,8 @@ services:
     ports:
       - "5173:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
   pgdata:

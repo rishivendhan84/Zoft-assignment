@@ -186,6 +186,69 @@ async def test_new_node_type_without_deploy(client):
     assert "discord.send_message" in {n["type"] for n in update["graph"]["nodes"]}
 
 
+async def test_concurrent_runs_cannot_lose_updates(client):
+    """The confirmed lost-update bug: two runs planning against the same head
+    must not both commit — the loser fails with workflow_conflict."""
+    import asyncio
+
+    cid = (await client.post("/conversations", json={})).json()["conversation_id"]
+    events = await send_and_stream(
+        client, cid, "Send a Slack message when Stripe receives a payment")
+    wf_id = by_type(events, "workflow_updated")[0]["workflow_id"]
+
+    r1, r2 = await asyncio.gather(
+        send_and_stream(client, cid, "Only notify for payments over $500"),
+        send_and_stream(client, cid, "Use Microsoft Teams instead of Slack"),
+    )
+    statuses = sorted(by_type(r, "done")[0]["status"] for r in (r1, r2))
+    assert statuses == ["completed", "failed"]
+    loser = r1 if by_type(r1, "done")[0]["status"] == "failed" else r2
+    assert any(e["code"] == "workflow_conflict" and e["recoverable"]
+               for e in by_type(loser, "error"))
+    # the head must equal exactly the winner's committed graph
+    winner = r2 if loser is r1 else r1
+    committed = by_type(winner, "workflow_updated")[0]
+    head = (await client.get(f"/workflows/{wf_id}")).json()["version"]
+    assert head["id"] == committed["version_id"]
+    assert head["graph"] == committed["graph"]
+
+
+async def test_error_envelope_on_422_and_unknown_route(client):
+    resp = await client.post("/conversations/c_x/messages", json={"content": ""})
+    assert resp.status_code == 422
+    err = resp.json()["error"]
+    assert err["code"] == "validation_error" and "content" in err["message"]
+    resp = await client.get("/no/such/route")
+    assert resp.status_code == 404 and "error" in resp.json()
+
+
+async def test_unknown_workflow_id_is_a_404(client):
+    cid = (await client.post("/conversations", json={})).json()["conversation_id"]
+    resp = await client.post(f"/conversations/{cid}/messages",
+                             json={"content": "hi", "workflow_id": "wf_ghost"})
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "workflow_not_found"
+
+
+async def test_invalid_config_schema_rejected_on_catalog_write(client):
+    resp = await client.post("/node-catalog", json={
+        "type": "broken.node", "category": "action", "title": "Broken",
+        "config_schema": {"type": "objekt"},
+        "input_ports": ["in"], "output_ports": ["out"]})
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "invalid_config_schema"
+
+
+async def test_versions_list_carries_operations(client):
+    cid = (await client.post("/conversations", json={})).json()["conversation_id"]
+    events = await send_and_stream(
+        client, cid, "Send a Slack message when Stripe receives a payment")
+    wf_id = by_type(events, "workflow_updated")[0]["workflow_id"]
+    versions = (await client.get(f"/workflows/{wf_id}/versions")).json()
+    assert versions[0]["operations"], "guarantee 4: diff renderable per version"
+    assert versions[0]["created_at"].endswith("Z")
+
+
 async def test_cancel_endpoint_is_idempotent(client):
     cid = (await client.post("/conversations", json={})).json()["conversation_id"]
     events = await send_and_stream(

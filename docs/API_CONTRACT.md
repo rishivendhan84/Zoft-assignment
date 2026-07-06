@@ -26,7 +26,20 @@ GET    /workflows/{id}/diff?from=&to=        → OperationDiff
 GET    /node-catalog?query=                  → [ NodeType ]      (semantic search)
 POST   /conversations/{cid}/messages         → { run_id }        (starts an AI run)
 GET    /runs/{run_id}/events                 → text/event-stream (SSE, see below)
-POST   /runs/{run_id}/cancel                 → 202 Accepted
+POST   /runs/{run_id}/cancel                 → 202 { status }    (idempotent; body is
+                                               'cancelling' or the already-terminal status)
+GET    /health                               → { status: "ok" }
+POST   /node-catalog                         → 201 { type }      (admin stub: add a node
+                                               type at runtime; 409 duplicate, 422 bad schema)
+```
+
+All timestamps are ISO-8601 UTC with a `Z` suffix (e.g. `2026-07-05T11:35:09Z`).
+
+`GET /workflows/{id}` response shape (the current version is nested):
+
+```jsonc
+{ "id": "wf_123", "name": "Stripe → Slack",
+  "current_version_id": "v8", "version": WorkflowVersion | null }
 ```
 
 ### Start a message / run
@@ -87,8 +100,15 @@ data: { "run_id": "run_abc", "status": "completed" }
 | `message` | `{ role, content }` | Final assistant message |
 | `error` | `{ code, message, recoverable }` | Failure UI (timeout, provider down…) |
 | `done` | `{ run_id, status: completed\|failed\|cancelled }` | Close the stream, settle UI |
+| `ping` | `{}` | Keep-alive on idle streams (~30 s); ignore |
 
 `phase` ∈ `planning · retrieving · proposing · validating · repairing · committing · explaining`.
+`repairing` steps also carry `attempt` and `max_attempts` (the configured repair budget).
+
+Notable `error` codes: `provider_timeout` / `provider_failover` (recoverable, mid-run),
+`provider_unavailable`, `validation_exhausted`, `workflow_conflict` (another run
+committed to the same workflow first — retry re-plans against the new head),
+`run_interrupted` (server restarted mid-run; nothing was persisted).
 
 ## Core types
 
@@ -101,10 +121,11 @@ type NodeType = {
 
 type Operation =
   | { op: 'add_node'; id: string; type: string; config?: object }
-  | { op: 'remove_node'; id: string }
+  | { op: 'remove_node'; id: string }                       // also drops its edges
   | { op: 'connect'; from: string; to: string; port?: string }
   | { op: 'disconnect'; from: string; to: string }
-  | { op: 'set_config'; id: string; config: object };
+  | { op: 'set_config'; id: string; config: object };       // shallow merge;
+                                                            // a null value deletes the key
 
 type WorkflowVersion = {
   id: string; workflow_id: string; parent_version_id?: string;
@@ -114,6 +135,13 @@ type WorkflowVersion = {
 };
 
 type OperationDiff = { from: string; to: string; operations: Operation[] };
+
+type VersionSummary = {           // GET /workflows/{id}/versions items
+  id: string; workflow_id: string; parent_version_id?: string;
+  author: 'user'|'ai'; rationale?: string;
+  operations: Operation[];        // guarantee 4: diff renderable per version
+  created_at: string;
+};
 
 type ConversationSummary = {
   id: string; workflow_id?: string; title?: string; created_at: string;
@@ -133,7 +161,8 @@ type WorkflowSummary = {
 ## Error model (REST)
 
 ```jsonc
-// non-2xx
+// non-2xx — including framework 404/405s and request-validation 422s
+// (code: "validation_error")
 { "error": { "code": "workflow_not_found", "message": "…", "recoverable": false } }
 ```
 
@@ -145,3 +174,6 @@ Run-level failures (LLM timeout, provider down, validation exhausted) are **not*
 2. Every run ends with exactly one `done` event (`completed` | `failed` | `cancelled`).
 3. Reconnecting to `/runs/{id}/events` with `Last-Event-ID` replays missed events (at-least-once).
 4. `operations` on each version are sufficient to render a diff without a second call.
+5. Concurrent runs can't silently overwrite each other: commit is a compare-and-swap
+   on the workflow head — the losing run fails with a recoverable `workflow_conflict`
+   error instead of clobbering the winner's version.

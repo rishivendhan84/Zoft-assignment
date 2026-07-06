@@ -257,10 +257,12 @@ export const useStore = create<StoreState>((set, get) => ({
       );
       set((s) => ({
         messages: { ...s.messages, [id]: [...merged, ...localOnly] },
-        messagesLoading: false,
+        // a slow fetch for a previously-selected conversation must not clear
+        // the skeleton of the one currently loading
+        ...(s.activeConversationId === id ? { messagesLoading: false } : {}),
       }));
     } catch (e) {
-      set({ messagesLoading: false });
+      if (get().activeConversationId === id) set({ messagesLoading: false });
       get().pushToast('error', `Couldn't load messages: ${errorText(e)}`);
     }
   },
@@ -341,14 +343,24 @@ export const useStore = create<StoreState>((set, get) => ({
     const patchRun = (fn: (run: ActiveRun) => Partial<ActiveRun>) =>
       set((s) => (s.activeRun ? { activeRun: { ...s.activeRun, ...fn(s.activeRun) } } : {}));
 
+    // A recoverable error (provider retry/failover) is superseded by any
+    // later progress — clear it so the "retrying" banner doesn't stick.
+    const clearRecoverable = (run: ActiveRun) =>
+      run.error?.recoverable ? { error: undefined } : {};
+
     closeActiveStream?.();
     closeActiveStream = openRunStream(runId, {
       onStep: (e) =>
         patchRun((run) => ({
+          ...clearRecoverable(run),
           timeline: [...run.timeline, { kind: 'step', entryId: ++entrySeq, ...e }],
         })),
 
-      onToken: (e) => patchRun((run) => ({ streamText: run.streamText + e.text })),
+      onToken: (e) =>
+        patchRun((run) => ({
+          ...clearRecoverable(run),
+          streamText: run.streamText + e.text,
+        })),
 
       onValidation: (e) =>
         patchRun((run) => {
@@ -372,7 +384,13 @@ export const useStore = create<StoreState>((set, get) => ({
         const highlights = highlightsFromOperations(e.operations);
         const ghosts =
           prev && prev.id === e.workflow_id
-            ? prev.graph.nodes.filter((n) => highlights.removedNodes.has(n.id))
+            ? prev.graph.nodes.filter(
+                (n) =>
+                  highlights.removedNodes.has(n.id) &&
+                  // an id reused by a replacement node is not a ghost — the
+                  // real node in the new graph wins
+                  !e.graph.nodes.some((m) => m.id === n.id),
+              )
             : [];
         const known = get().workflows.find((w) => w.id === e.workflow_id);
         set((s) => ({
@@ -474,8 +492,41 @@ export const useStore = create<StoreState>((set, get) => ({
     if (!run || run.status === 'cancelling') return;
     set({ activeRun: { ...run, status: 'cancelling' } });
     try {
-      await cancelRun(run.runId);
-      // UI settles when the stream delivers done{status:'cancelled'}.
+      const { status } = await cancelRun(run.runId);
+      // Normally the stream's done{cancelled} settles the UI. If the backend
+      // says there was no live task (e.g. the run was orphaned by a restart),
+      // no done will ever arrive on this stream — settle locally instead of
+      // leaving the composer locked forever.
+      if (status !== 'cancelling') {
+        closeActiveStream?.();
+        closeActiveStream = null;
+        const current = get().activeRun;
+        if (!current || current.runId !== run.runId) return;
+        const assistant: ChatMessage | null =
+          current.streamText || current.timeline.length > 0
+            ? {
+                id: `run-${current.runId}`,
+                role: 'assistant',
+                content: current.streamText,
+                created_at: new Date().toISOString(),
+                run_id: current.runId,
+                timeline: current.timeline,
+                runStatus: (status as ChatMessage['runStatus']) ?? 'cancelled',
+              }
+            : null;
+        set((s) => ({
+          activeRun: null,
+          messages: assistant
+            ? {
+                ...s.messages,
+                [current.conversationId]: [
+                  ...(s.messages[current.conversationId] ?? []),
+                  assistant,
+                ],
+              }
+            : s.messages,
+        }));
+      }
     } catch (e) {
       set((s) =>
         s.activeRun ? { activeRun: { ...s.activeRun, status: 'streaming' } } : {},
@@ -568,7 +619,11 @@ export const useStore = create<StoreState>((set, get) => ({
         getVersion(wfId, diffFrom),
       ]);
       const highlights = highlightsFromOperations(diff.operations);
-      const ghosts = fromVersion.graph.nodes.filter((n) => highlights.removedNodes.has(n.id));
+      const ghosts = fromVersion.graph.nodes.filter(
+        (n) =>
+          highlights.removedNodes.has(n.id) &&
+          !toVersion.graph.nodes.some((m) => m.id === n.id), // replaced ≠ ghost
+      );
       set({
         diffLoading: false,
         panelTab: 'canvas', // show the highlighted graph alongside the changelog

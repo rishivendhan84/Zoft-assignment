@@ -9,6 +9,7 @@ Two implementations behind one interface:
 
 import asyncio
 import json
+from collections import OrderedDict
 from typing import AsyncIterator
 
 try:
@@ -17,10 +18,17 @@ except ImportError:  # redis is optional
     aioredis = None
 
 TERMINAL_EVENT = "done"
+KEEPALIVE_SECONDS = 30
+BUFFER_TTL_SECONDS = 3600
+MAX_BUFFERED_RUNS = 500
 
 
 class EventBus:
     async def publish(self, run_id: str, event: str, data: dict) -> None:
+        raise NotImplementedError
+
+    async def count(self, run_id: str) -> int:
+        """Number of buffered events for a run (0 ⇒ nothing to replay)."""
         raise NotImplementedError
 
     async def subscribe(
@@ -34,23 +42,39 @@ class EventBus:
 
 class InMemoryEventBus(EventBus):
     def __init__(self) -> None:
-        self._buffers: dict[str, list[dict]] = {}
-        self._signals: dict[str, asyncio.Event] = {}
+        # OrderedDict as an LRU: bounded even if 'done' eviction never fires
+        self._buffers: OrderedDict[str, list[dict]] = OrderedDict()
+        self._conds: dict[str, asyncio.Condition] = {}
 
-    def _signal(self, run_id: str) -> asyncio.Event:
-        return self._signals.setdefault(run_id, asyncio.Event())
+    def _cond(self, run_id: str) -> asyncio.Condition:
+        return self._conds.setdefault(run_id, asyncio.Condition())
+
+    def _evict(self, run_id: str) -> None:
+        self._buffers.pop(run_id, None)
+        self._conds.pop(run_id, None)
 
     async def publish(self, run_id: str, event: str, data: dict) -> None:
         buf = self._buffers.setdefault(run_id, [])
-        buf.append({"id": len(buf) + 1, "event": event, "data": data})
-        sig = self._signal(run_id)
-        sig.set()
-        sig.clear()
+        self._buffers.move_to_end(run_id)
+        while len(self._buffers) > MAX_BUFFERED_RUNS:
+            self._buffers.popitem(last=False)
+        cond = self._cond(run_id)
+        async with cond:
+            buf.append({"id": len(buf) + 1, "event": event, "data": data})
+            cond.notify_all()
+        if event == TERMINAL_EVENT:
+            # keep the buffer around for late reconnect replay, then drop it
+            asyncio.get_running_loop().call_later(
+                BUFFER_TTL_SECONDS, self._evict, run_id)
+
+    async def count(self, run_id: str) -> int:
+        return len(self._buffers.get(run_id, []))
 
     async def subscribe(
         self, run_id: str, last_event_id: int | None = None
     ) -> AsyncIterator[dict]:
         cursor = last_event_id or 0
+        cond = self._cond(run_id)
         while True:
             buf = self._buffers.get(run_id, [])
             while cursor < len(buf):
@@ -59,10 +83,18 @@ class InMemoryEventBus(EventBus):
                 yield item
                 if item["event"] == TERMINAL_EVENT:
                     return
-            try:
-                await asyncio.wait_for(self._signal(run_id).wait(), timeout=30)
-            except asyncio.TimeoutError:
-                yield {"id": cursor, "event": "ping", "data": {}}  # keep-alive
+            idle = False
+            async with cond:
+                # re-check under the lock so a publish between the drain above
+                # and this wait can never be missed
+                if cursor >= len(self._buffers.get(run_id, [])):
+                    try:
+                        await asyncio.wait_for(cond.wait(),
+                                               timeout=KEEPALIVE_SECONDS)
+                    except asyncio.TimeoutError:
+                        idle = True
+            if idle:  # yielded outside the lock so publishers never block
+                yield {"id": cursor, "event": "ping", "data": {}}
 
 
 class RedisEventBus(EventBus):
@@ -79,9 +111,12 @@ class RedisEventBus(EventBus):
         entry = {"event": event, "data": data}
         async with self._redis.pipeline(transaction=True) as pipe:
             pipe.rpush(key, json.dumps(entry))
-            pipe.expire(key, 3600)
+            pipe.expire(key, BUFFER_TTL_SECONDS)
             pipe.publish(key, "1")
             await pipe.execute()
+
+    async def count(self, run_id: str) -> int:
+        return await self._redis.llen(self._key(run_id))
 
     async def subscribe(
         self, run_id: str, last_event_id: int | None = None
@@ -100,11 +135,10 @@ class RedisEventBus(EventBus):
                     if entry["event"] == TERMINAL_EVENT:
                         return
                 cursor += len(raw)
-                try:
-                    await asyncio.wait_for(pubsub.get_message(
-                        ignore_subscribe_messages=True, timeout=30
-                    ), timeout=31)
-                except asyncio.TimeoutError:
+                # get_message returns None on timeout (it does not raise)
+                msg = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=KEEPALIVE_SECONDS)
+                if msg is None:
                     yield {"id": cursor, "event": "ping", "data": {}}
         finally:
             await pubsub.unsubscribe(key)

@@ -46,9 +46,20 @@ def validate_graph(graph: dict, catalog: dict[str, dict]) -> ValidationResult:
             ))
             continue
 
-        # 2. Config must satisfy the type's JSON Schema.
-        validator = jsonschema.Draft202012Validator(spec["config_schema"])
-        for err in sorted(validator.iter_errors(node.get("config", {})), key=str):
+        # 2. Config must satisfy the type's JSON Schema. A broken schema in the
+        # catalog (data, not code — so it can be wrong) must surface as a
+        # validation error, never as a crashed run.
+        try:
+            validator = jsonschema.Draft202012Validator(spec["config_schema"])
+            config_errors = sorted(
+                validator.iter_errors(node.get("config", {})), key=str)
+        except Exception as e:
+            errors.append(ValidationError(
+                node["id"], "broken_catalog_schema",
+                f"config_schema for '{node['type']}' is not a valid JSON Schema: {e}",
+            ))
+            continue
+        for err in config_errors:
             path = ".".join(str(p) for p in err.absolute_path) or "config"
             errors.append(ValidationError(
                 node["id"], "invalid_config", f"{path}: {err.message}",
@@ -73,6 +84,18 @@ def validate_graph(graph: dict, catalog: dict[str, dict]) -> ValidationResult:
                     src["id"], "invalid_port",
                     f"'{src['type']}' has no output port '{port}' "
                     f"(available: {src_spec['output_ports']}).",
+                ))
+            if src_spec and not src_spec["output_ports"]:
+                errors.append(ValidationError(
+                    src["id"], "invalid_edge",
+                    f"'{src['type']}' has no output ports and cannot start an edge.",
+                ))
+            if src_spec and len(src_spec["output_ports"]) > 1 and not port:
+                errors.append(ValidationError(
+                    src["id"], "ambiguous_port",
+                    f"'{src['type']}' has multiple output ports "
+                    f"({src_spec['output_ports']}); the edge to "
+                    f"'{edge['to']}' must name one.",
                 ))
             if dst_spec and not dst_spec["input_ports"]:
                 errors.append(ValidationError(

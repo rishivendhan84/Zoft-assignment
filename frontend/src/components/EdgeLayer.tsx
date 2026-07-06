@@ -1,6 +1,6 @@
 import type { Edge } from '../types';
 import { NODE_H, NODE_W, type LayoutResult } from '../lib/layout';
-import { edgeKey, type GraphHighlights } from '../lib/diff';
+import { edgeKey, edgePairKey, type GraphHighlights } from '../lib/diff';
 
 /** SVG bezier edges drawn underneath the node cards, labeled with `port`. */
 export function EdgeLayer({
@@ -23,9 +23,8 @@ export function EdgeLayer({
         const to = layout.byId.get(edge.to);
         if (!from || !to) return null;
 
-        const key = edgeKey(edge.from, edge.to);
-        const removed = highlights.removedEdges.has(key);
-        const added = highlights.addedEdges.has(key);
+        const removed = highlights.removedEdges.has(edgePairKey(edge.from, edge.to));
+        const added = highlights.addedEdges.has(edgeKey(edge.from, edge.to, edge.port));
 
         const x1 = from.x + NODE_W;
         const y1 = from.y + NODE_H / 2;
@@ -46,7 +45,7 @@ export function EdgeLayer({
             : 'fill-zinc-300 dark:fill-zinc-600';
 
         return (
-          <g key={`${key}-${edge.port ?? ''}`} className="transition-all duration-700">
+          <g key={edgeKey(edge.from, edge.to, edge.port)} className="transition-all duration-700">
             <path
               d={path}
               fill="none"

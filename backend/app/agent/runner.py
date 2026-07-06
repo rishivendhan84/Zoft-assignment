@@ -10,7 +10,7 @@ import asyncio
 import logging
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from ..core.catalog import load_catalog, search_nodes
 from ..core.events import get_bus
@@ -26,6 +26,10 @@ log = logging.getLogger("agent.runner")
 _active_runs: dict[str, asyncio.Task] = {}
 
 
+class WorkflowConflict(Exception):
+    """Another run committed to this workflow between our snapshot and commit."""
+
+
 async def start_run(conversation_id: str, content: str,
                     workflow_id: str | None) -> str:
     async with SessionLocal() as session:
@@ -33,6 +37,8 @@ async def start_run(conversation_id: str, content: str,
         if conversation is None:
             raise LookupError("conversation_not_found")
         workflow_id = workflow_id or conversation.workflow_id
+        if workflow_id and await session.get(Workflow, workflow_id) is None:
+            raise LookupError("workflow_not_found")
         run = Run(conversation_id=conversation_id, workflow_id=workflow_id)
         session.add(run)
         session.add(Message(conversation_id=conversation_id, role="user",
@@ -87,6 +93,9 @@ async def _execute(run_id: str, conversation_id: str,
             if workflow_id:
                 wf = await session.get(Workflow, workflow_id)
                 if wf and wf.current_version_id:
+                    # remember which head this run planned against — commit()
+                    # refuses to persist if the head moved (lost-update guard)
+                    ctx["base_version_id"] = wf.current_version_id
                     version = await session.get(WorkflowVersion, wf.current_version_id)
                     if version:
                         graph_json = version.graph
@@ -106,6 +115,8 @@ async def _execute(run_id: str, conversation_id: str,
                 wf_id = ctx["workflow_id"]
                 if wf_id:
                     wf = await session.get(Workflow, wf_id)
+                    if wf is None:
+                        raise WorkflowConflict("workflow was deleted mid-run")
                 else:
                     wf = Workflow(name=_workflow_name(
                         state["candidate_graph"], state["full_catalog"]))
@@ -125,10 +136,29 @@ async def _execute(run_id: str, conversation_id: str,
                 )
                 session.add(version)
                 await session.flush()
-                wf.current_version_id = version.id
+                if wf_id:
+                    # optimistic concurrency: only advance the head if it is
+                    # still the version this run planned against (CAS) — a
+                    # concurrent run must not have its committed work clobbered
+                    result = await session.execute(
+                        update(Workflow)
+                        .where(Workflow.id == wf.id,
+                               Workflow.current_version_id
+                               == ctx.get("base_version_id"))
+                        .values(current_version_id=version.id)
+                    )
+                    if result.rowcount == 0:
+                        await session.rollback()
+                        raise WorkflowConflict(
+                            "the workflow was changed by another run while "
+                            "this one was planning")
+                else:
+                    wf.current_version_id = version.id
                 await session.commit()
                 committed = {"workflow_id": wf.id, "version_id": version.id,
                              "graph": version.graph, "operations": version.operations}
+            ctx["committed"] = {"workflow_id": committed["workflow_id"],
+                                "version_id": committed["version_id"]}
             await emit("workflow_updated", committed)
             return {"graph": state["candidate_graph"]}
 
@@ -177,54 +207,91 @@ async def _execute(run_id: str, conversation_id: str,
         final = await agent.ainvoke(initial)
 
         if final.get("failed"):
-            await _finish(run_id, conversation_id, "failed",
-                          assistant_text=final["failed"],
-                          error_event={"code": "validation_exhausted",
-                                       "message": final["failed"],
-                                       "recoverable": False})
+            await _shielded_finish(run_id, conversation_id, "failed",
+                                   assistant_text=final["failed"],
+                                   error_event={"code": "validation_exhausted",
+                                                "message": final["failed"],
+                                                "recoverable": False})
         else:
-            await _finish(run_id, conversation_id, "completed",
-                          assistant_text=final.get("assistant_text", "Done."))
+            await _shielded_finish(run_id, conversation_id, "completed",
+                                   assistant_text=final.get("assistant_text", "Done."))
 
     except asyncio.CancelledError:
-        await _finish(run_id, conversation_id, "cancelled",
-                      assistant_text="Stopped — no changes were saved.")
+        if ctx.get("committed"):
+            text = ("Stopped — but this change had already passed validation and "
+                    f"was saved as version {ctx['committed']['version_id']}. "
+                    "You can roll it back from the History tab.")
+        else:
+            text = "Stopped — no changes were saved."
+        await _shielded_finish(run_id, conversation_id, "cancelled",
+                               assistant_text=text)
         raise
+    except WorkflowConflict as e:
+        await _shielded_finish(
+            run_id, conversation_id, "failed",
+            assistant_text=f"I didn't save this change: {e}. Please retry — "
+                           "I'll re-plan against the latest version.",
+            error_event={"code": "workflow_conflict", "message": str(e),
+                         "recoverable": True})
     except ProviderError as e:
-        await _finish(run_id, conversation_id, "failed",
-                      assistant_text=f"The AI provider failed: {e}. Nothing was changed "
-                                     "— you can retry the same message.",
-                      error_event={"code": "provider_unavailable", "message": str(e),
-                                   "recoverable": True})
+        await _shielded_finish(
+            run_id, conversation_id, "failed",
+            assistant_text=f"The AI provider failed: {e}. Nothing was changed "
+                           "— you can retry the same message.",
+            error_event={"code": "provider_unavailable", "message": str(e),
+                         "recoverable": True})
     except Exception:
         log.exception("run %s crashed", run_id)
-        await _finish(run_id, conversation_id, "failed",
-                      assistant_text="Something went wrong on our side. No changes "
-                                     "were saved.",
-                      error_event={"code": "internal_error",
-                                   "message": "unexpected error", "recoverable": True})
+        await _shielded_finish(
+            run_id, conversation_id, "failed",
+            assistant_text="Something went wrong on our side. No changes "
+                           "were saved.",
+            error_event={"code": "internal_error",
+                         "message": "unexpected error", "recoverable": True})
+
+
+_finishers: set[asyncio.Task] = set()
+
+
+async def _shielded_finish(*args, **kwargs) -> None:
+    """Cancellation must not interrupt terminal bookkeeping halfway — the
+    inner task runs to completion even if this await is cancelled, and the
+    status CAS in _finish keeps any follow-up call from double-publishing."""
+    task = asyncio.create_task(_finish(*args, **kwargs))
+    _finishers.add(task)
+    task.add_done_callback(_finishers.discard)
+    await asyncio.shield(task)
 
 
 async def _finish(run_id: str, conversation_id: str, status: str,
                   assistant_text: str, error_event: dict | None = None) -> None:
     bus = get_bus()
+    won = True  # publish even if the DB is unreachable so clients settle
     try:
         async with SessionLocal() as session:
-            run = await session.get(Run, run_id)
-            if run:
-                run.status = status
-                run.error = (error_event or {}).get("message")
-            if assistant_text:
-                session.add(Message(conversation_id=conversation_id, role="assistant",
-                                    content=assistant_text, run_id=run_id))
+            # CAS on run status: exactly one caller gets to publish terminal
+            # events, no matter how cancel/failure paths overlap
+            result = await session.execute(
+                update(Run)
+                .where(Run.id == run_id, Run.status == "running")
+                .values(status=status, error=(error_event or {}).get("message"))
+            )
+            won = result.rowcount > 0
+            if won and assistant_text:
+                session.add(Message(conversation_id=conversation_id,
+                                    role="assistant", content=assistant_text,
+                                    run_id=run_id))
             await session.commit()
-    finally:
-        if error_event:
-            await bus.publish(run_id, "error", error_event)
-        if assistant_text:
-            await bus.publish(run_id, "message",
-                              {"role": "assistant", "content": assistant_text})
-        await bus.publish(run_id, "done", {"run_id": run_id, "status": status})
+    except Exception:
+        log.exception("finalizing run %s failed", run_id)
+    if not won:
+        return
+    if error_event:
+        await bus.publish(run_id, "error", error_event)
+    if assistant_text:
+        await bus.publish(run_id, "message",
+                          {"role": "assistant", "content": assistant_text})
+    await bus.publish(run_id, "done", {"run_id": run_id, "status": status})
 
 
 def _workflow_name(graph: dict, catalog: dict) -> str:

@@ -1,6 +1,13 @@
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PlainSerializer
+
+# SQLite hands back naive datetimes; the contract promises ISO-8601 UTC, so
+# normalize on the way out (Postgres values are already aware).
+UTCDateTime = Annotated[datetime, PlainSerializer(
+    lambda v: (v if v.tzinfo else v.replace(tzinfo=timezone.utc))
+    .astimezone(timezone.utc).isoformat().replace("+00:00", "Z"))]
 
 
 class CreateConversation(BaseModel):
@@ -11,7 +18,7 @@ class ConversationSummary(BaseModel):
     id: str
     workflow_id: str | None
     title: str
-    created_at: datetime
+    created_at: UTCDateTime
 
 
 class MessageOut(BaseModel):
@@ -20,7 +27,7 @@ class MessageOut(BaseModel):
     role: str
     content: str
     run_id: str | None
-    created_at: datetime
+    created_at: UTCDateTime
 
 
 class SendMessage(BaseModel):
@@ -32,7 +39,7 @@ class WorkflowSummary(BaseModel):
     id: str
     name: str
     current_version_id: str | None
-    updated_at: datetime
+    updated_at: UTCDateTime
 
 
 class VersionSummary(BaseModel):
@@ -41,12 +48,12 @@ class VersionSummary(BaseModel):
     parent_version_id: str | None
     author: str
     rationale: str
-    created_at: datetime
+    operations: list  # contract guarantee: enough to render a diff per version
+    created_at: UTCDateTime
 
 
 class VersionOut(VersionSummary):
     graph: dict
-    operations: list
 
 
 class WorkflowOut(BaseModel):

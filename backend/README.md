@@ -56,7 +56,9 @@ app/
                    validate → (commit | repair | fail) → explain
     runner.py      run lifecycle: background task, event emission, persistence
     prompts.py
-tests/             18 unit tests + 7 end-to-end scenario tests
+tests/             33 tests: deterministic-core units + end-to-end scenarios
+                   (reference conversation over REST/SSE, repair loop, timeout,
+                   concurrent-edit conflict, SSE replay) — run on SQLite & Postgres
 ```
 
 ## Design notes (the short version)
@@ -65,6 +67,11 @@ tests/             18 unit tests + 7 end-to-end scenario tests
   They're applied to a copy, validated by pure code against the DB catalog,
   and only then committed — as a new **immutable version** (append-only, so
   failed runs can't half-mutate anything).
+- **Commit is a compare-and-swap** on `workflows.current_version_id` against
+  the version the run planned on. Two concurrent runs on one workflow can't
+  silently overwrite each other: the loser ends with a recoverable
+  `workflow_conflict` error and nothing persisted. A startup sweep settles
+  runs orphaned by a restart (marked failed, `done` published).
 - **Repair loop is bounded** (`MAX_REPAIR_ATTEMPTS`). Validator errors carry
   machine codes and "did you mean" hints that are fed back to the planner.
 - **Every LLM failure mode has a coded path** (see the recovery table in the

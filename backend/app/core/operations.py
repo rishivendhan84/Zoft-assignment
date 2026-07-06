@@ -77,6 +77,9 @@ def apply(graph: dict, operations: list[dict[str, Any]]) -> dict:
                 raise OperationError(f"operation {i}: node '{op.get('id')}' not found")
             if not isinstance(op.get("config"), dict):
                 raise OperationError(f"operation {i}: set_config needs a 'config' object")
-            node["config"] = {**node.get("config", {}), **op["config"]}
+            # shallow merge; a null value deletes the key (lets diffs express
+            # key removal, since none of the catalog schemas use null values)
+            merged = {**node.get("config", {}), **op["config"]}
+            node["config"] = {k: v for k, v in merged.items() if v is not None}
 
     return g

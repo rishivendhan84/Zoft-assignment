@@ -21,15 +21,15 @@ This single pattern answers safety, versioning, explainability ("why did you cha
 |---|---|
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Backend AI platform design, data model, reliability & scaling |
 | [`docs/API_CONTRACT.md`](docs/API_CONTRACT.md) | The FE ↔ BE contract (either side buildable independently) |
-| `backend/` | Python · FastAPI · LangGraph · PostgreSQL/pgvector · Redis |
-| `frontend/` | React · Vite · Tailwind · shadcn/ui · SSE streaming |
+| `backend/` | Python · FastAPI · LangGraph · PostgreSQL · Redis |
+| `frontend/` | React · Vite · Tailwind (hand-rolled components) · SSE streaming |
 
 ## Stack & key decisions
 
 - **Backend:** Python + FastAPI (async, best AI ecosystem).
 - **Agent:** LangGraph state machine — `plan → retrieve nodes → propose ops → validate → repair → commit → explain`, emitting progress at each step.
-- **Persistence:** PostgreSQL + pgvector (workflows, immutable versions, conversations, node-catalog embeddings).
-- **Async:** Redis-backed workers for generation, validation, embedding, indexing.
+- **Persistence:** PostgreSQL (workflows, immutable versions, conversations, runs, node catalog); commits are optimistic-concurrency-safe (CAS on the workflow head).
+- **Async:** `202 {run_id}` + a background task per run; progress flows over a pluggable event bus (in-memory or Redis pub/sub with replay). A dedicated worker pool is the documented scale path — the bus is the seam.
 - **Streaming:** **SSE** (one-way server→client, auto-reconnect, plain HTTP; cancellation is a separate endpoint). See rationale in the API contract.
 - **Node catalog is data, not code** — node types live in the DB with JSON-Schema configs; the agent retrieves them via RAG/tools, so new nodes need no redeploy.
 
@@ -57,8 +57,10 @@ cd backend && python -m venv .venv && . .venv/bin/activate \
 cd frontend && npm install && npm run dev     # http://localhost:5173
 ```
 
-Tests: `cd backend && pytest` — 25 tests including a full end-to-end run of the
-reference conversation over REST + SSE.
+Tests: `cd backend && pytest` — 33 tests including a full end-to-end run of the
+reference conversation over REST + SSE, hallucination-repair, timeout failure,
+concurrent-edit conflict, and SSE replay; the suite runs unchanged against
+SQLite and Postgres.
 
 **Demo levers** (type in chat): `!hallucinate` makes the planner propose a
 non-existent node so you can watch the validator reject it and the repair loop

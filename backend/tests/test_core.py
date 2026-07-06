@@ -132,6 +132,32 @@ class TestValidator:
         result = validate_graph(g, CATALOG)
         assert any(e.code == "invalid_edge" for e in result.errors)
 
+    def test_multi_output_edge_must_name_a_port(self):
+        g = ops.apply(make_graph(), [
+            {"op": "disconnect", "from": "n1", "to": "n2"},
+            {"op": "add_node", "id": "n3", "type": "logic.filter",
+             "config": {"conditions": []}},
+            {"op": "connect", "from": "n1", "to": "n3"},
+            {"op": "connect", "from": "n3", "to": "n2"},  # no port → ambiguous
+        ])
+        result = validate_graph(g, CATALOG)
+        assert any(e.code == "ambiguous_port" for e in result.errors)
+        g["edges"] = [e if e["from"] != "n3" else {**e, "port": "true"}
+                      for e in g["edges"]]
+        assert validate_graph(g, CATALOG).ok
+
+    def test_broken_catalog_schema_is_an_error_not_a_crash(self):
+        catalog = {**CATALOG, "bad.node": {
+            "type": "bad.node", "category": "action", "title": "Bad",
+            "keywords": [], "config_schema": {"type": "objekt"},  # invalid
+            "input_ports": ["in"], "output_ports": ["out"]}}
+        g = ops.apply(make_graph(), [
+            {"op": "add_node", "id": "n3", "type": "bad.node"},
+            {"op": "connect", "from": "n1", "to": "n3"},
+        ])
+        result = validate_graph(g, catalog)
+        assert any(e.code == "broken_catalog_schema" for e in result.errors)
+
 
 class TestDiff:
     def test_diff_roundtrip(self):
@@ -169,3 +195,12 @@ class TestDiff:
         d = diff_graphs(old, new)
         assert d == [{"op": "set_config", "id": "n2",
                       "config": {"channel": "#ops", "text": "hi"}}]
+
+    def test_removed_config_key_round_trips_via_null(self):
+        old, new = make_graph(), make_graph()
+        del new["nodes"][1]["config"]["text"]
+        d = diff_graphs(old, new)
+        assert d == [{"op": "set_config", "id": "n2",
+                      "config": {"channel": "#sales", "text": None}}]
+        rebuilt = ops.apply(old, d)
+        assert rebuilt["nodes"][1]["config"] == {"channel": "#sales"}

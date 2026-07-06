@@ -25,6 +25,7 @@ export function Timeline({ entries, live }: { entries: TimelineEntry[]; live: bo
           key={entry.entryId}
           entry={entry}
           active={live && i === entries.length - 1 && entry.kind === 'step'}
+          live={live}
         />
       ))}
     </div>

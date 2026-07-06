@@ -1,5 +1,6 @@
 import json
 
+import jsonschema
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
@@ -55,8 +56,9 @@ async def list_messages(cid: str, session: AsyncSession = Depends(get_session)):
 async def send_message(cid: str, body: schemas.SendMessage):
     try:
         run_id = await runner.start_run(cid, body.content, body.workflow_id)
-    except LookupError:
-        raise _error(404, "conversation_not_found", f"No conversation {cid}")
+    except LookupError as e:
+        code = str(e)  # conversation_not_found | workflow_not_found
+        raise _error(404, code, f"No such {'workflow' if 'workflow' in code else 'conversation'}")
     return {"run_id": run_id}
 
 
@@ -127,6 +129,11 @@ async def add_node_type(body: schemas.NodeTypeIn,
     """Admin stub proving 'new node definitions arrive without deploys' —
     a row insert, immediately searchable by the agent and enforced by the
     validator. (Would sit behind auth in production.)"""
+    try:
+        jsonschema.Draft202012Validator.check_schema(body.config_schema)
+    except jsonschema.SchemaError as e:
+        raise _error(422, "invalid_config_schema",
+                     f"config_schema is not a valid JSON Schema: {e.message}")
     existing = await session.get(NodeType, body.type)
     if existing:
         raise _error(409, "node_type_exists", f"'{body.type}' already exists")
@@ -146,6 +153,22 @@ async def run_events(run_id: str, request: Request,
 
     last_id = request.headers.get("last-event-id")
     cursor = int(last_id) if last_id and last_id.isdigit() else None
+
+    bus = get_bus()
+    if run.status != "running" and await bus.count(run_id) == 0:
+        # terminal run with no replayable events (e.g. the process restarted):
+        # settle the client immediately instead of pinging forever
+        async def settle():
+            if run.error:
+                yield ("event: error\ndata: "
+                       + json.dumps({"code": "run_interrupted",
+                                     "message": run.error,
+                                     "recoverable": True}) + "\n\n")
+            yield ("event: done\ndata: "
+                   + json.dumps({"run_id": run_id, "status": run.status}) + "\n\n")
+
+        return StreamingResponse(settle(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache"})
 
     async def stream():
         async for item in get_bus().subscribe(run_id, cursor):

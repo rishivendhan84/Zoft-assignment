@@ -18,12 +18,15 @@ class AnthropicProvider(LLMProvider):
         try:
             resp = await self._client.messages.create(
                 model=self._model,
-                max_tokens=2048,
+                max_tokens=8192,  # headroom: thinking tokens count against this
                 system=system,
                 messages=[{"role": "user", "content": user}],
             )
         except anthropic.APIError as e:  # includes timeouts/5xx
             raise ProviderError(f"anthropic: {e}") from e
+        if resp.stop_reason == "max_tokens":
+            # a truncated JSON plan must fail loudly, not parse mysteriously
+            raise ProviderError("anthropic: response truncated at max_tokens")
         text = "".join(b.text for b in resp.content if b.type == "text")
         if json_mode:
             # models occasionally fence JSON despite instructions
