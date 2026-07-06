@@ -75,14 +75,25 @@ def _plan(ctx: dict) -> dict:
     if edit:
         return edit
 
+    triggers = sorted(c["title"].split(":")[0] for c in catalog.values()
+                      if c["category"] == "trigger")
+    actions = sorted(c["title"].split(":")[0] for c in catalog.values()
+                     if c["category"] == "action")
     return {
         "intent": "chat",
         "operations": [],
         "rationale": "",
         "reply": (
-            "I couldn't map that to a workflow change. Try something like "
-            "\"Send a Slack message when Stripe receives a payment\", "
-            "\"use Teams instead of Slack\", or \"only notify for payments over $500\"."
+            "I couldn't map that to a specific workflow change. I'm running on "
+            "the offline rule-based planner, so I understand the reference "
+            "scenario and close variants — set ANTHROPIC_API_KEY for open-ended "
+            "requests.\n\n"
+            f"Available triggers: {', '.join(triggers)}. "
+            f"Available actions: {', '.join(actions)}.\n"
+            "Try: \"Send a Slack message when Stripe receives a payment\", "
+            "\"use Teams instead of Slack\", \"only notify for payments over "
+            "$500 on weekdays\", \"change the channel to #ops\", "
+            "\"explain this workflow\", or \"why did you change that?\"."
         ),
     }
 
@@ -111,7 +122,8 @@ def _create_plan(msg: str, graph: dict, catalog: dict) -> dict | None:
 
 
 def _swap_plan(msg: str, graph: dict, catalog: dict) -> dict | None:
-    if not re.search(r"instead|replace|swap|switch|rather|use (microsoft )?teams|use slack", msg):
+    if not re.search(r"instead|replace|swap|switch|rather|change to|move to|"
+                     r"make it|use (microsoft )?teams|use slack|use email", msg):
         return None
     # the swap target must be a service the message actually names (its type
     # prefix, e.g. 'teams'), and must not already be in the graph — otherwise
@@ -155,8 +167,16 @@ def _swap_plan(msg: str, graph: dict, catalog: dict) -> dict | None:
 
 def _condition_plan(msg: str, graph: dict, catalog: dict) -> dict | None:
     conditions = []
-    amount = re.search(r"(?:over|above|>|more than|greater than)\s*\$?\s*([\d,]+)", msg)
-    if amount:
+    amount = re.search(
+        r"(?:over|above|exceed(?:s|ing)?|more than|greater than|bigger than|"
+        r">=?)\s*\$?\s*([\d,]+)", msg)
+    at_least = re.search(r"(?:at least|minimum of|min|>=)\s*\$?\s*([\d,]+)", msg)
+    if at_least:
+        conditions.append({
+            "field": "amount", "op": ">=",
+            "value": int(at_least.group(1).replace(",", "")),
+        })
+    elif amount:
         conditions.append({
             "field": "amount", "op": ">",
             "value": int(amount.group(1).replace(",", "")),

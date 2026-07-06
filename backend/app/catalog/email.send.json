@@ -3,7 +3,7 @@
   "category": "action",
   "title": "Email: Send",
   "description": "Sends an email to one or more recipients.",
-  "keywords": ["email", "mail", "send", "notify", "smtp", "message"],
+  "keywords": ["email", "e-mail", "mail", "inbox", "send", "notify", "notification", "smtp", "message"],
   "config_schema": {
     "type": "object",
     "properties": {

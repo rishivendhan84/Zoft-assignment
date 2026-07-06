@@ -3,7 +3,7 @@
   "category": "trigger",
   "title": "Stripe: Payment received",
   "description": "Fires when a Stripe payment succeeds. Emits amount, currency, customer_email and day_of_week.",
-  "keywords": ["stripe", "payment", "charge", "money", "received", "transaction", "checkout"],
+  "keywords": ["stripe", "payment", "payments", "pay", "pays", "paid", "charge", "charged", "money", "received", "receives", "transaction", "checkout", "purchase", "purchased", "sale", "sold", "order", "revenue", "customer"],
   "config_schema": {
     "type": "object",
     "properties": {

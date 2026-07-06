@@ -3,7 +3,7 @@
   "category": "action",
   "title": "Slack: Send message",
   "description": "Posts a message to a Slack channel.",
-  "keywords": ["slack", "message", "notify", "notification", "channel", "chat", "post"],
+  "keywords": ["slack", "message", "notify", "notification", "notified", "channel", "chat", "post", "ping", "alert", "dm", "tell", "let me know"],
   "config_schema": {
     "type": "object",
     "properties": {

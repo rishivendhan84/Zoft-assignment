@@ -3,7 +3,7 @@
   "category": "action",
   "title": "Microsoft Teams: Send message",
   "description": "Posts a message to a Microsoft Teams channel via webhook.",
-  "keywords": ["teams", "microsoft", "message", "notify", "notification", "channel", "chat", "post"],
+  "keywords": ["teams", "microsoft", "msteams", "message", "notify", "notification", "channel", "chat", "post", "ping", "alert"],
   "config_schema": {
     "type": "object",
     "properties": {

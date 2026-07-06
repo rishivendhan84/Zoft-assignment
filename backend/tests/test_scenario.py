@@ -249,6 +249,39 @@ async def test_versions_list_carries_operations(client):
     assert versions[0]["created_at"].endswith("Z")
 
 
+@pytest.mark.parametrize("message,expect_type", [
+    ("Ping the team on Slack when we get a Stripe payment", "slack.send_message"),
+    ("Email me whenever a customer pays through Stripe", "email.send"),
+    ("Notify us on Microsoft Teams when a purchase comes in", "teams.send_message"),
+])
+async def test_scripted_planner_accepts_natural_phrasings(client, message, expect_type):
+    cid = (await client.post("/conversations", json={})).json()["conversation_id"]
+    events = await send_and_stream(client, cid, message)
+    assert by_type(events, "done")[0]["status"] == "completed"
+    updates = by_type(events, "workflow_updated")
+    assert updates, f"phrasing should build a workflow: {message!r}"
+    types = {n["type"] for n in updates[0]["graph"]["nodes"]}
+    assert "stripe.payment_received" in types and expect_type in types
+
+
+async def test_swap_accepts_change_to_phrasing(client):
+    cid = (await client.post("/conversations", json={})).json()["conversation_id"]
+    await send_and_stream(
+        client, cid, "Send a Slack message when Stripe receives a payment")
+    events = await send_and_stream(client, cid, "Actually change to Teams")
+    types = {n["type"] for n in by_type(events, "workflow_updated")[0]["graph"]["nodes"]}
+    assert "teams.send_message" in types and "slack.send_message" not in types
+
+
+async def test_unmapped_request_is_a_graceful_noop_not_a_failure(client):
+    cid = (await client.post("/conversations", json={})).json()["conversation_id"]
+    events = await send_and_stream(client, cid, "tell me a joke about databases")
+    assert by_type(events, "done")[0]["status"] == "completed"  # not 'failed'
+    assert not by_type(events, "workflow_updated")  # nothing persisted
+    reply = by_type(events, "message")[0]["content"].lower()
+    assert "trigger" in reply and "action" in reply  # lists what's available
+
+
 async def test_cancel_endpoint_is_idempotent(client):
     cid = (await client.post("/conversations", json={})).json()["conversation_id"]
     events = await send_and_stream(
