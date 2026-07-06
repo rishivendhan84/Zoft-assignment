@@ -49,11 +49,18 @@ provider**, so the full demo runs offline. Set `ANTHROPIC_API_KEY` on the
 backend service to put a real model at the front of the chain — the scripted
 provider then becomes the failover target.
 
-Local dev without Docker (SQLite + in-memory bus, zero services):
+Local dev without Docker (SQLite + in-memory bus, zero services). One command:
+
+```bash
+./run-local.sh          # starts backend :8000 + frontend :5173, prints the URL
+```
+
+Then open **http://localhost:5173**. Requires Python 3.11+ and Node 20+.
+On Windows use Git Bash / WSL, or run the two halves by hand:
 
 ```bash
 cd backend && python -m venv .venv && . .venv/bin/activate \
-  && pip install -r requirements.txt && uvicorn app.main:app --reload
+  && pip install -r requirements.txt && uvicorn app.main:app --port 8000
 cd frontend && npm install && npm run dev     # http://localhost:5173
 ```
 
